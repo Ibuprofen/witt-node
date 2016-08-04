@@ -1,3 +1,4 @@
+// echo -n "@255000000#" | nc -4u -w0 192.168.5.10 8888
 #include <ESP8266WiFi.h>
 #include <WiFiUDP.h>
 
@@ -14,6 +15,10 @@ IPAddress subnet(255,255,255,0);
 uint8_t MAC_array[6];
 char MAC_char[18];
 
+// time between connection status checks (seconds)
+#define WIFICHECKTIMEOUT 60
+unsigned long lastCheckedWifiStatus = millis();
+
 // UDP
 WiFiUDP UDP;
 #define UDP_PORT 8888
@@ -22,12 +27,12 @@ WiFiUDP UDP;
 const double BRIGHTNESS = 1.0;//1.0;
 #define NUM_LEDS     10  // maximum LED node number we can receive
 // 10W nodes do not have a zero address
-#define BEGIN_LED 1
+#define BEGIN_LED 0
 // duration to (approx) run an sd card animation for
 #define ANIMATIONDURATION 60
 // wait this long for udp packets before fallback
 #define SILENCETIMEOUT 10
-uint8_t incoming_leds[(NUM_LEDS + BEGIN_LED) * 3] = {0};
+uint8_t incoming_leds[NUM_LEDS*3] = {0};
 uint8_t incoming_state = 0; // 0=none, 1=node
 uint8_t incoming_index = 0;
 uint8_t incoming_led;
@@ -41,6 +46,11 @@ int udpAvail = 0;
 //uint8_t led_map[NUM_LEDS] = { 0, 1, 2, 3, 4, 5, 6, 7, 8, 9,10,11,12,13,14,15,16,17,18,19};
 //uint8_t led_map[NUM_LEDS] = {12,19, 0, 9,17, 4, 5,16, 7, 6, 1,11,15, 3,13, 8,10,14,18, 2};
 uint8_t led_map[NUM_LEDS] = {0, 1, 2, 3, 4, 5, 6, 7, 8, 9};
+
+#define LEDPIN 2
+
+// prevent LED, power savings, "off"
+boolean lights_out = false;
 
 // fallback animation
 unsigned long lastHeardDataAt = millis();
@@ -63,32 +73,7 @@ void setup() {
 
   delay(100); // iono
 
-  // WIFI Client ---------------------------------------------------------------
-  Serial.println();
-  Serial.println();
-  Serial.print("Connecting to ");
-  Serial.println(ssid);
-
-  //bool config(IPAddress local_ip, IPAddress gateway, IPAddress subnet, IPAddress dns1 = (uint32_t)0x00000000, IPAddress dns2 = (uint32_t)0x00000000);
-  WiFi.config(ip, gateway, subnet);
-  WiFi.begin(ssid, password);
-
-  while (WiFi.status() != WL_CONNECTED) {
-    delay(500);
-    Serial.print(".");
-  }
-
-  Serial.println("");
-  Serial.println("WiFi connected");
-  Serial.println("IP address: ");
-  Serial.println(WiFi.localIP());
-
-  Serial.print("MAC address: ");
-  WiFi.macAddress(MAC_array);
-  for (int i = 0; i < sizeof(MAC_array); ++i){
-    sprintf(MAC_char,"%s%02x:",MAC_char,MAC_array[i]);
-  }
-  Serial.println(MAC_char);
+  connectToWifi();
 
   // UDP  ----------------------------------------------------------------------
   while (!UDP.begin(UDP_PORT)) {
@@ -120,57 +105,74 @@ void reorder_nodes_serial1(void)
 }
 
 void parseIncoming() {
-  while (udpAvail > 0) {
 
-    lastHeardDataAt = millis();
+  while (udpAvail > 0) {
 
     unsigned char c = UDP.read();
 
-    if (c == '@') {
-      incoming_state = 1;
-      incoming_index = 0;
-    } else if (c == '#') {
+    // turn out the lights
+    if (c == '$' && !lights_out) {
 
-      startFrame();
-      reorder_nodes_serial1();
-      Serial1.write(outgoing_leds, sizeof(outgoing_leds));
-      Serial1.flush();
+      lights_out = true;
+      // send a black frame to make sure they all turn off
+      setColor(0,0,0);
 
-      incoming_state = 0;
+    } else if (c == '%' && lights_out) {
+
+      lights_out = false;
 
     } else {
-      if (incoming_state == 1) {
 
-        // decode incoming LED data as it arrives
-        if (c >= '0' && c <= '9') {
-          int n = c - '0';
-          switch (incoming_index) {
-          case  0: incoming_led   = n * 100; break;
-          case  1: incoming_led   += n * 10; break;
-          case  2: incoming_led   += n;      break;
-          case  3: incoming_red   = n * 100; break;
-          case  4: incoming_red   += n * 10; break;
-          case  5: incoming_red   += n;      break;
-          case  6: incoming_green = n * 100; break;
-          case  7: incoming_green += n * 10; break;
-          case  8: incoming_green += n;      break;
-          case  9: incoming_blue  = n * 100; break;
-          case 10: incoming_blue  += n * 10; break;
-          case 11: incoming_blue  += n;      break;
-          default: incoming_index = 0;       break;
-          }
-          incoming_index++;
-          if (incoming_index >= 12) {
-            if (incoming_led < NUM_LEDS) {
-              n = incoming_led * 3;
-              incoming_leds[n+0] = incoming_red;
-              incoming_leds[n+1] = incoming_green;
-              incoming_leds[n+2] = incoming_blue;
+      lastHeardDataAt = millis();
+
+      if (c == '@') {
+
+        incoming_state = 1;
+        incoming_index = 0;
+        incoming_led = 0;
+
+      } else if (c == '#') {
+
+        startFrame();
+        //reorder_nodes_serial1();
+        memcpy(outgoing_leds, incoming_leds, sizeof(incoming_leds));
+        Serial1.write(outgoing_leds, sizeof(outgoing_leds));
+        Serial1.flush();
+
+        incoming_state = 0;
+      } else {
+        if (incoming_state == 1) {
+
+          // decode incoming LED data as it arrives
+          if (c >= '0' && c <= '9') {
+            int n = c - '0';
+            switch (incoming_index) {
+            case  0: incoming_red   = n * 100; break;
+            case  1: incoming_red   += n * 10; break;
+            case  2: incoming_red   += n;      break;
+            case  3: incoming_green = n * 100; break;
+            case  4: incoming_green += n * 10; break;
+            case  5: incoming_green += n;      break;
+            case  6: incoming_blue  = n * 100; break;
+            case  7: incoming_blue  += n * 10; break;
+            case  8: incoming_blue  += n;      break;
+            default: incoming_index = 0;       break;
             }
-            incoming_index = 0;
+            incoming_index++;
+            if (incoming_index >= 9) {
+              if (incoming_led < NUM_LEDS) {
+                n = incoming_led * 3;
+                incoming_leds[n+0] = incoming_red;
+                incoming_leds[n+1] = incoming_green;
+                incoming_leds[n+2] = incoming_blue;
+                incoming_led++;
+              }
+              incoming_index = 0;
+            }
           }
         }
       }
+
     }
 
     udpAvail = udpAvail - 1;
@@ -178,8 +180,8 @@ void parseIncoming() {
 }
 
 
-void loop() {
 
+void loop() {
 
   if (udpAvail) {
     parseIncoming();
@@ -188,11 +190,19 @@ void loop() {
   }
 
   // nothing heard in a while.. do SOMETHING
-  if (lastHeardDataAt + SILENCETIMEOUT * 1000 < millis()) {
+  if (!lights_out && (lastHeardDataAt + SILENCETIMEOUT * 1000 < millis())) {
 
     fadeNext();
     delay(10);
 
+  }
+
+  // see if we need to reconnect to the wifi
+  if (lastCheckedWifiStatus + WIFICHECKTIMEOUT * 1000 < millis()) {
+    if (WiFi.status() != WL_CONNECTED) {
+      connectToWifi();
+    }
+    lastCheckedWifiStatus = millis();
   }
 
   // allow the ESP to do what it do
@@ -287,4 +297,42 @@ void fadeNext() {
   }
   setLedColorHSV(hue, 1, 1); //We are using Saturation and Value constant at 1
   globalHue = hue;
+}
+
+void connectToWifi() {
+  // WIFI Client ---------------------------------------------------------------
+  Serial.println();
+  Serial.println();
+  Serial.print("Connecting to ");
+  Serial.println(ssid);
+
+  //bool config(IPAddress local_ip, IPAddress gateway, IPAddress subnet, IPAddress dns1 = (uint32_t)0x00000000, IPAddress dns2 = (uint32_t)0x00000000);
+  WiFi.config(ip, gateway, subnet);
+  WiFi.begin(ssid, password);
+
+  pinMode(LEDPIN, OUTPUT);
+
+  while (WiFi.status() != WL_CONNECTED) {
+    digitalWrite(LEDPIN, LOW);
+    delay(250);
+    Serial.print(".");
+    digitalWrite(LEDPIN, HIGH);
+    delay(250);
+  }
+
+  Serial.println("");
+  Serial.println("WiFi connected");
+  Serial.println("IP address: ");
+  Serial.println(WiFi.localIP());
+
+  Serial.print("MAC address: ");
+
+  memset(MAC_array, 0, sizeof(MAC_array)); // zero the array
+  memset(MAC_char, 0, sizeof(MAC_char)); // zero the array
+
+  WiFi.macAddress(MAC_array);
+  for (int i = 0; i < sizeof(MAC_array); ++i){
+    sprintf(MAC_char,"%s%02x:",MAC_char,MAC_array[i]);
+  }
+  Serial.println(MAC_char);
 }
