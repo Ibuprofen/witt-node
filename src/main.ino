@@ -111,17 +111,21 @@ void parseIncoming() {
     unsigned char c = UDP.read();
 
     // turn out the lights
-    if (c == '$' && !lights_out) {
+    if (c == '$') {
 
       lights_out = true;
       // send a black frame to make sure they all turn off
       setColor(0,0,0);
 
-    } else if (c == '%' && lights_out) {
+      Serial.println("off");
+
+    } else if (c == '%') {
 
       lights_out = false;
 
-    } else {
+      Serial.println("on");
+
+    } else if (!lights_out) {
 
       lastHeardDataAt = millis();
 
